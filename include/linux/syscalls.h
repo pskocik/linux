@@ -905,5 +905,20 @@ asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
 asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
 			  unsigned mask, struct statx __user *buffer);
-
 #endif
+
+struct supersyscall_args {
+    unsigned call_nr;
+    long     args[6];
+};
+#define SUPERSYSCALL__abort_on_failure    0
+#define SUPERSYSCALL__continue_on_failure 1
+/*#define SUPERSYSCALL__lock_something    2?*/
+
+
+asmlinkage 
+long 
+sys_supersyscall(long* Rets, 
+                 struct supersyscall_args *Args, 
+                 int Nargs, 
+                 int Flags);
