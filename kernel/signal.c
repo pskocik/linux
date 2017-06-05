@@ -981,6 +981,24 @@ static inline void userns_fixup_signal_uid(struct siginfo *info, struct task_str
 #endif
 
 static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
+			int group, int from_ancestor_ns);
+
+static int __send_signal2(int sig, struct siginfo *info, struct task_struct *task,
+			int group, int from_ancestor_ns, bool all_threads)
+{
+    struct task_struct *t = task;
+    int ret = 0;
+    if(!all_threads)
+        return __send_signal(sig, info, task, group, from_ancestor_ns);
+
+    /*send signal to each thread*/
+	while_each_thread(task, t) {
+        if( 0 > (ret=__send_signal(sig, info, t, false/*group*/, from_ancestor_ns)))
+            return ret;
+    }
+    return ret;
+}
+static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 			int group, int from_ancestor_ns)
 {
 	struct sigpending *pending;
@@ -1085,7 +1103,7 @@ ret:
 }
 
 static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
-			int group)
+			int group, bool all_threads)
 {
 	int from_ancestor_ns = 0;
 
@@ -1094,7 +1112,7 @@ static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
 			   !task_pid_nr_ns(current, task_active_pid_ns(t));
 #endif
 
-	return __send_signal(sig, info, t, group, from_ancestor_ns);
+	return __send_signal2(sig, info, t, group, from_ancestor_ns, all_threads);
 }
 
 static void print_fatal_signal(int signr)
@@ -1133,27 +1151,32 @@ __setup("print-fatal-signals=", setup_print_fatal_signals);
 int
 __group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 {
-	return send_signal(sig, info, p, 1);
+	return send_signal(sig, info, p, 1, 0);
 }
 
 static int
 specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 {
-	return send_signal(sig, info, t, 0);
+	return send_signal(sig, info, t, 0, 0);
 }
 
-int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
-			bool group)
+int do_send_sig_info2(int sig, struct siginfo *info, struct task_struct *p, 
+            bool group, bool all_threads)
 {
 	unsigned long flags;
 	int ret = -ESRCH;
 
 	if (lock_task_sighand(p, &flags)) {
-		ret = send_signal(sig, info, p, group);
+		ret = send_signal(sig, info, p, group, all_threads);
 		unlock_task_sighand(p, &flags);
 	}
 
 	return ret;
+}
+int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
+			bool group)
+{
+    return do_send_sig_info2(sig, info, p, group, 0);
 }
 
 /*
@@ -1262,7 +1285,7 @@ struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
 /*
  * send signal info to all the members of a group
  */
-int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
+int group_send_sig_info2(int sig, struct siginfo *info, struct task_struct *p, bool all_threads)
 {
 	int ret;
 
@@ -1271,9 +1294,13 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	rcu_read_unlock();
 
 	if (!ret && sig)
-		ret = do_send_sig_info(sig, info, p, true);
+		ret = do_send_sig_info2(sig, info, p, true, all_threads);
 
 	return ret;
+}
+int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
+{
+    return group_send_sig_info2(sig, info, p, false);
 }
 
 /*
@@ -1281,7 +1308,7 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
  * control characters do (^C, ^Z etc)
  * - the caller must hold at least a readlock on tasklist_lock
  */
-int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
+int __kill_pgrp_info2(int sig, struct siginfo *info, struct pid *pgrp, bool all_threads)
 {
 	struct task_struct *p = NULL;
 	int retval, success;
@@ -1289,14 +1316,18 @@ int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
 	success = 0;
 	retval = -ESRCH;
 	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
-		int err = group_send_sig_info(sig, info, p);
+		int err = group_send_sig_info2(sig, info, p, all_threads);
 		success |= !err;
 		retval = err;
 	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
 	return success ? 0 : retval;
 }
+int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
+{
+    return __kill_pgrp_info2(sig, info, pgrp, false);
+}
 
-int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
+static int kill_pid_info2(int sig, struct siginfo *info, struct pid *pid, bool all_threads)
 {
 	int error = -ESRCH;
 	struct task_struct *p;
@@ -1305,7 +1336,7 @@ int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)
-			error = group_send_sig_info(sig, info, p);
+			error = group_send_sig_info2(sig, info, p, all_threads);
 		rcu_read_unlock();
 		if (likely(!p || error != -ESRCH))
 			return error;
@@ -1316,6 +1347,12 @@ int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
 		 * de_thread() it will find the new leader.
 		 */
 	}
+
+}
+
+int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
+{
+    return kill_pid_info2(sig, info, pid, 0);
 }
 
 int kill_proc_info(int sig, struct siginfo *info, pid_t pid)
@@ -1375,6 +1412,7 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(kill_pid_info_as_cred);
 
+
 /*
  * kill_something_info() interprets pid in interesting ways just like kill(2).
  *
@@ -1382,39 +1420,13 @@ EXPORT_SYMBOL_GPL(kill_pid_info_as_cred);
  * is probably wrong.  Should make it like BSD or SYSV.
  */
 
+#define TID_ANY  0
+#define TID_ALL -1
+static int tgkill_something_info(pid_t tgid, pid_t tid, int sig, struct siginfo *info);
+
 static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
 {
-	int ret;
-
-	if (pid > 0) {
-		rcu_read_lock();
-		ret = kill_pid_info(sig, info, find_vpid(pid));
-		rcu_read_unlock();
-		return ret;
-	}
-
-	read_lock(&tasklist_lock);
-	if (pid != -1) {
-		ret = __kill_pgrp_info(sig, info,
-				pid ? find_vpid(-pid) : task_pgrp(current));
-	} else {
-		int retval = 0, count = 0;
-		struct task_struct * p;
-
-		for_each_process(p) {
-			if (task_pid_vnr(p) > 1 &&
-					!same_thread_group(p, current)) {
-				int err = group_send_sig_info(sig, info, p);
-				++count;
-				if (err != -EPERM)
-					retval = err;
-			}
-		}
-		ret = count ? retval : -ESRCH;
-	}
-	read_unlock(&tasklist_lock);
-
-	return ret;
+    return tgkill_something_info(pid, TID_ANY, sig, info);
 }
 
 /*
@@ -2905,6 +2917,82 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 	return error;
 }
 
+/* 
+   tgid:
+        -PGRP  : process group PGRP
+        -1  : all reachable processes
+         0  : current process group
+        tgid: process id tgid
+   tid:
+        <-1 : illegal
+        -1  : all threads in each matching tgid
+        0   : any thread in each matcing tgid
+        >0  : direct ( tgid > 0 ? with_a_tgid_check : without_a_tgid_check)
+   
+   In table form:   
+   =====================
+
+   p = process; t = thread
+              tid-1                          tid0                      tid+            
+   tgid+      1p/ALL t                      1p/ANY t                   1p/1t
+   tgid0     curr p GRP/ ALL t              curr p GRP/ ANY t          DIRECT
+   tgid-1     ALL p/ ALL t                  ALL p / ANY t              DIRECT
+   tgid-      p GRP/ ALL t                  p GRP / ANY t              DIRECT
+
+*/
+
+static int tgkill_something_info(pid_t tgid, pid_t tid, int sig, struct siginfo *info)
+{
+    int ret;
+    bool all_threads;
+    
+    if(tid < TID_ALL)
+        return -EINVAL;
+
+    if(tgid == 0) 
+        tgid = current->pid;
+
+    if (tgid > 0) {
+        if (tid > 0){ /*send specific*/
+            return do_send_specific(tgid, tid, sig, info);
+        }else if(tid == TID_ANY){
+            return kill_pid_info2(sig, info, find_vpid(tgid), false/*all_threads*/);
+        }else{ /*ALL*/
+            return kill_pid_info2(sig, info, find_vpid(tgid), true/*all_threads*/);
+        }
+    }
+    if (tid > 0){
+        /* and tgid <= 0 : send directly to tid, bypassing tgid check*/
+        return do_send_specific(0, tid, sig, info);
+    }
+
+    /*tid is TID_ANY or TID_ALL */
+    all_threads = tid;
+
+	read_lock(&tasklist_lock);
+	if (tgid != -1) {
+		ret = __kill_pgrp_info2(sig, info,
+				tgid ? find_vpid(-tgid) : task_pgrp(current), all_threads);
+	} else {
+		int retval = 0, count = 0;
+		struct task_struct * p;
+
+		for_each_process(p) {
+			if (task_tgid_vnr(p) > 1 &&
+					!same_thread_group(p, current)) {
+				int err = group_send_sig_info2(sig, info, p, all_threads);
+				++count;
+				if (err != -EPERM)
+					retval = err;
+			}
+		}
+		ret = count ? retval : -ESRCH;
+	}
+	read_unlock(&tasklist_lock);
+    return ret;
+}
+
+
 static int do_tkill(pid_t tgid, pid_t pid, int sig)
 {
 	struct siginfo info = {};
@@ -2915,26 +3003,22 @@ static int do_tkill(pid_t tgid, pid_t pid, int sig)
 	info.si_pid = task_tgid_vnr(current);
 	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
 
-	return do_send_specific(tgid, pid, sig, &info);
+	return tgkill_something_info(tgid, pid, sig, &info);
 }
 
 /**
- *  sys_tgkill - send signal to one specific thread
+ *  sys_tgkill - like sys_kill but thread-aware
  *  @tgid: the thread group ID of the thread
  *  @pid: the PID of the thread
  *  @sig: signal to be sent
  *
- *  This syscall also checks the @tgid and returns -ESRCH even if the PID
+ *  If both tgid and tid is positive, this syscall also checks the @tgid and returns -ESRCH even if the PID
  *  exists but it's not belonging to the target process anymore. This
  *  method solves the problem of threads exiting and PIDs getting reused.
  */
-SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
+SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, tid, int, sig)
 {
-	/* This is only valid for single tasks */
-	if (pid <= 0 || tgid <= 0)
-		return -EINVAL;
-
-	return do_tkill(tgid, pid, sig);
+	return do_tkill(tgid, tid, sig);
 }
 
 /**
@@ -2947,10 +3031,10 @@ SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
 SYSCALL_DEFINE2(tkill, pid_t, pid, int, sig)
 {
 	/* This is only valid for single tasks */
-	if (pid <= 0)
-		return -EINVAL;
+    if (pid<=0)
+        return -EINVAL;
 
-	return do_tkill(0, pid, sig);
+	return do_tkill(-1, pid, sig);
 }
 
 static int do_rt_sigqueueinfo(pid_t pid, int sig, siginfo_t *info)
